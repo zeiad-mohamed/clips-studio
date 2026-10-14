@@ -33,8 +33,6 @@ services:
       # prints titles containing emoji and the default here is ASCII.
       PYTHONIOENCODING: utf-8
       PYTHONUNBUFFERED: '1'
-    depends_on:
-      - ollama
 
   # The front-end toolchain: Vite, React, TypeScript. Open
   # http://localhost:5173 in a browser to work on the interface without
@@ -68,24 +66,6 @@ services:
       # through a bind mount; inotify does not cross that boundary.
       CHOKIDAR_USEPOLLING: 'true'
 
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - '127.0.0.1:11434:11434'
-    volumes:
-      # Models are gigabytes. Losing them on a rebuild would be painful.
-      - ollama-models:/root/.ollama
-    # GPU: uncomment with the NVIDIA Container Toolkit installed. Without it
-    # Ollama runs on CPU, which works and is slow. See docs/DOCKER.md.
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-
 volumes:
   clips-data:
-  ollama-models:
   ui-node-modules:
