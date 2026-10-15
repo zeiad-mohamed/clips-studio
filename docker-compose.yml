@@ -15,10 +15,11 @@ services:
     # GHCR image here; with `image:` present, compose pulls it instead of
     # building, so local changes never made it into the container.)
     build: .
-    ports:
-      # Host-only. Publishing to 0.0.0.0 would put an unauthenticated API
-      # that reads and writes video files onto the local network.
-      - '127.0.0.1:8765:8765'
+    # No ports published here: deploy platforms (Coolify) reach containers
+    # over the Docker network and a fixed host port would collide between
+    # projects on one server. Local development gets the ports from
+    # docker-compose.override.yml, which compose merges automatically and
+    # `docker compose -f docker-compose.yml` deployments ignore.
     volumes:
       # No source bind mount: the image already contains the code, and on
       # deploy platforms (e.g. Coolify) `.` is not the source checkout — an
@@ -39,8 +40,6 @@ services:
   # domain, port 5173 locally) and the engine does not need a public one.
   ui:
     build: ./ui
-    ports:
-      - '127.0.0.1:5173:80'
     depends_on:
       - engine
 

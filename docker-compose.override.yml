@@ -1,0 +1,19 @@
+# Local-development overrides, merged automatically by `docker compose up`.
+#
+# Deploy platforms invoke compose with an explicit `-f docker-compose.yml`
+# (Coolify does), which does NOT merge this file — so published host ports
+# exist only on a contributor's machine. That keeps the base file free of
+# fixed host ports, which would otherwise collide when two projects run on
+# the same deploy server.
+#
+# Bind to 127.0.0.1, not 0.0.0.0: the engine has no auth and reads/writes
+# video files, so it must never sit on the local network.
+
+services:
+  engine:
+    ports:
+      - '127.0.0.1:8765:8765'
+
+  ui:
+    ports:
+      - '127.0.0.1:5173:80'
