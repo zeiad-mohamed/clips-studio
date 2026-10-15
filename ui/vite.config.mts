@@ -58,9 +58,41 @@ function relaxCspForBrowserDev(): Plugin {
   }
 }
 
+/** Rewrites the CSP of the BUILT page for browser deployment.
+ *
+ *  The checked-in `index.html` allows only `127.0.0.1:8765` — right for the
+ *  packaged app, wrong for a deployment where the engine sits at
+ *  VITE_API_BASE, or (VITE_API_BASE='') behind this image's nginx, where
+ *  everything is same-origin and the host is unknown at build time.
+ */
+function cspForBrowserBuild(): Plugin {
+  return {
+    name: 'csp-for-browser-build',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'pre',
+      handler: (html) => {
+        const base = process.env.VITE_API_BASE ?? ''
+        const engine = base === '' ? '' : ` ${base} ${base.replace(/^http/, 'ws')}`
+        return html.replace(
+          /<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/,
+          '<meta http-equiv="Content-Security-Policy" content="' +
+            "default-src 'self'; " +
+            // 'self' covers same-origin ws/wss (CSP3); the explicit schemes
+            // are kept for older browsers.
+            `connect-src 'self' ws: wss:${engine}; ` +
+            `media-src 'self'${engine}; ` +
+            `img-src 'self' data: blob:${engine}; ` +
+            "style-src 'self' 'unsafe-inline'\" />"
+        )
+      }
+    }
+  }
+}
+
 export default defineConfig({
   root: 'src/renderer',
-  plugins: [react(), tailwindcss(), relaxCspForBrowserDev()],
+  plugins: [react(), tailwindcss(), relaxCspForBrowserDev(), cspForBrowserBuild()],
   server: {
     // 0.0.0.0 so the port is reachable from outside the container. The
     // published port is bound to 127.0.0.1 in docker-compose.yml, so this

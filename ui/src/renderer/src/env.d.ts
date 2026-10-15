@@ -85,3 +85,14 @@ interface Window {
     }
   }
 }
+
+/** Vite build-time environment. `VITE_API_BASE` is set by ui/Dockerfile:
+ *  '' means same-origin (the ui image's nginx proxies to the engine);
+ *  unset keeps the renderer talking to 127.0.0.1:8765 directly. */
+interface ImportMetaEnv {
+  readonly VITE_API_BASE?: string
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv
+}

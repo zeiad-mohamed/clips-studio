@@ -1,7 +1,10 @@
-# Contributor environment: the Clips Kitty engine plus Ollama.
+# Contributor environment AND deployment stack: the Clips Kitty engine plus
+# the renderer served by nginx.
 #
-#   docker compose up --build        engine on http://localhost:8765
+#   docker compose up --build        engine on http://localhost:8765,
+#                                    ui on http://localhost:5173
 #   docker compose run --rm engine pytest
+#   docker compose --profile dev up ui-dev    live-reload dev server
 #
 # Not an installation route — creators use the Windows installer. See
 # docs/DOCKER.md for what this can and cannot do.
@@ -24,28 +27,38 @@ services:
       # than the container, which is thrown away on every rebuild.
       - clips-data:/data
     environment:
-      # Inside the compose network Ollama is a service name, not localhost.
-      CLIPS_STUDIO_OLLAMA_HOST: http://ollama:11434
       CLIPS_STUDIO_DATA_DIR: /data
       # Windows-locale encoding is not a container problem, but the engine
       # prints titles containing emoji and the default here is ASCII.
       PYTHONIOENCODING: utf-8
       PYTHONUNBUFFERED: '1'
 
-  # The front-end toolchain: Vite, React, TypeScript. Open
-  # http://localhost:5173 in a browser to work on the interface without
-  # installing Node.
+  # The renderer, built for production and served by nginx, which also
+  # reverse-proxies the API and the /ws WebSocket to the engine. The browser
+  # therefore only ever talks to ONE origin — expose this service (Coolify
+  # domain, port 5173 locally) and the engine does not need a public one.
+  ui:
+    build: ./ui
+    ports:
+      - '127.0.0.1:5173:80'
+    depends_on:
+      - engine
+
+  # The front-end dev toolchain: Vite, React, TypeScript with live reload.
+  # Off by default (profile "dev") so deployments only run the two services
+  # above; start it with `docker compose --profile dev up ui-dev`.
   #
   # This serves the RENDERER, not Electron. Electron needs a display, so the
   # desktop shell still runs on your host — see docs/DOCKER.md. In a browser
   # the interface works and talks to the engine; only the native bits
   # (file pickers, the donate window, external links) are unavailable,
   # because those live in Electron's preload.
-  ui:
+  ui-dev:
+    profiles: [dev]
     image: node:20-slim
     working_dir: /app/ui
     ports:
-      - '127.0.0.1:5173:5173'
+      - '127.0.0.1:5174:5173'
     volumes:
       - .:/app
       # Anonymous volume so the container keeps its OWN node_modules. Without

@@ -47,7 +47,11 @@ import type {
 import type { Capabilities, FanOut, PlatformRow, UploadPostStatus } from './uploadpost'
 import type { RemoteRenderState } from './remoteRender'
 
-export const API_BASE = 'http://127.0.0.1:8765'
+/** Engine origin. In the browser Docker build VITE_API_BASE is '' — the
+ *  nginx in the ui image proxies API and WebSocket to the engine, so every
+ *  request is same-origin and no CORS applies. Unset (dev on a host) keeps
+ *  the engine's local address. */
+export const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8765'
 
 /** What the Gaming / Reaction layout editor shows frames of. */
 export type LayoutSource = { clipId: number } | { url?: string; path?: string }

@@ -1,7 +1,13 @@
 import { useEffect, useRef } from 'react'
 import type { StudioEvent } from './types'
 
-const WS_URL = 'ws://127.0.0.1:8765/ws'
+const WS_URL = (() => {
+  const base = import.meta.env.VITE_API_BASE
+  if (base === undefined) return 'ws://127.0.0.1:8765/ws'
+  // Same-origin build (nginx proxies to the engine): derive from the page.
+  if (base === '') return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+  return `${base.replace(/^http/, 'ws')}/ws`
+})()
 
 /** Subscribe to live backend events; reconnects automatically. */
 export function useEvents(onEvent: (event: StudioEvent) => void): void {
