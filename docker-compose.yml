@@ -17,9 +17,9 @@ services:
       # that reads and writes video files onto the local network.
       - '127.0.0.1:8765:8765'
     volumes:
-      # Source is mounted so edits are live without rebuilding. The image
-      # already contains a copy, so it still runs standalone.
-      - .:/app
+      # No source bind mount: the image already contains the code, and on
+      # deploy platforms (e.g. Coolify) `.` is not the source checkout — an
+      # empty mount would shadow /app and the container would fail to start.
       # Downloads, clips and the database persist in a named volume rather
       # than the container, which is thrown away on every rebuild.
       - clips-data:/data
