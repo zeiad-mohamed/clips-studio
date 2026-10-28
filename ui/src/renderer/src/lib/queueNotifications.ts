@@ -34,7 +34,7 @@ function send(title: string, body: string): void {
   void window.studio?.notify?.(title, body)
 }
 
-export function useQueueNotifications(): void {
+export function useQueueNotifications(enabled = true): void {
   useEvents((e: StudioEvent) => {
     if (e.type !== 'job') return
     // Re-renders and subtitle exports finish in seconds while the user is
@@ -64,5 +64,5 @@ export function useQueueNotifications(): void {
     if (remaining === 0 && notifyOnQueueEmpty()) {
       send('Clips Kitty', 'All queued videos have finished processing.')
     }
-  })
+  }, enabled)
 }

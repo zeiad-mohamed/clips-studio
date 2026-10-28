@@ -33,6 +33,11 @@ services:
       # prints titles containing emoji and the default here is ASCII.
       PYTHONIOENCODING: utf-8
       PYTHONUNBUFFERED: '1'
+      # Optional single-user login wall for exposing the API beyond localhost.
+      # Set BOTH (non-empty) to require a login; unset either leaves the API
+      # fully open as it is by default. See docs/API.md (Authentication).
+      CLIPS_STUDIO_AUTH_USER: admin
+      CLIPS_STUDIO_AUTH_PASSWORD: change-me
 
   # The renderer, built for production and served by nginx, which also
   # reverse-proxies the API and the /ws WebSocket to the engine. The browser

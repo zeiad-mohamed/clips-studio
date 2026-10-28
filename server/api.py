@@ -8,16 +8,21 @@ Python or the filesystem directly.
 """
 
 import asyncio
+import hmac
 import json
+import os
 import re
+import secrets
 import shutil
 import threading
+import time
 import traceback
 import urllib.error
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import requests as _requests
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -34,6 +39,13 @@ from server.jobs import Worker
 API_VERSION = 1
 
 # ---- request bodies ----------------------------------------------------------
+
+
+class LoginIn(BaseModel):
+    """Credentials for the opt-in single-user login endpoint."""
+
+    username: str
+    password: str
 
 
 class JobIn(BaseModel):
@@ -655,21 +667,147 @@ def _quiet_connection_resets(loop, context: dict) -> None:
     loop.default_exception_handler(context)
 
 
+class _AuthSessions:
+    """In-memory session tokens for the opt-in single-user auth.
+
+    A single shared user means the set is tiny, so lookup compares with
+    `hmac.compare_digest` over every live token rather than hashing (the same
+    constant-time pattern `remote_render/queue.py` uses for worker secrets).
+    Held only in memory: a restart throws every session away on purpose.
+    """
+
+    def __init__(self) -> None:
+        self._tokens: set[str] = set()
+        self._lock = threading.Lock()
+
+    def issue(self) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            self._tokens.add(token)
+        return token
+
+    def valid(self, token: str | None) -> bool:
+        if not token:
+            return False
+        with self._lock:
+            for live in self._tokens:
+                if hmac.compare_digest(live, token):
+                    return True
+        return False
+
+    def discard(self, token: str | None) -> None:
+        if not token:
+            return
+        with self._lock:
+            self._tokens.discard(token)
+
+
+def _bearer_token(headers) -> str | None:
+    """The `Bearer <token>` from ASGI scope headers (a list of (bytes, bytes))."""
+    for name, value in headers:
+        if name == b"authorization" and value.startswith(b"Bearer "):
+            return value[len(b"Bearer "):].decode()
+    return None
+
+
+def _query_token(query_string: bytes) -> str | None:
+    """The `token` query parameter from an ASGI WebSocket scope."""
+    if not query_string:
+        return None
+    values = parse_qs(query_string.decode()).get("token") or []
+    return values[0] if values else None
+
+
+class _AuthMiddleware:
+    """Pure-ASGI auth gate: requires a valid session token on every HTTP route
+    except `GET /health` and `POST /login` (and CORS preflight, which the CORS
+    middleware answers first), and on the `/ws` WebSocket via `?token=` (browsers
+    cannot set headers on a WebSocket). Added only while auth is enabled, and
+    after CORS/TrustedHost, so it runs innermost: a bad Host or origin is
+    refused before a token is even looked at.
+
+    Not `BaseHTTPMiddleware`: that never sees `websocket` scopes, so it could
+    not guard the event stream. This sees both and can reject the handshake
+    (close 1008, policy violation) before `accept()`.
+    """
+
+    def __init__(self, app, sessions: _AuthSessions) -> None:
+        self.app = app
+        self.sessions = sessions
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            method = scope["method"]
+            path = scope["path"]
+            if method == "OPTIONS" or (method == "GET" and path == "/health") or (
+                method == "POST" and path == "/login"
+            ):
+                await self.app(scope, receive, send)
+                return
+            if self.sessions.valid(_bearer_token(scope.get("headers", []))):
+                await self.app(scope, receive, send)
+                return
+            await self._reject_http(send)
+            return
+        if scope["type"] == "websocket":
+            if self.sessions.valid(_query_token(scope.get("query_string", b""))):
+                await self.app(scope, receive, send)
+                return
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await self.app(scope, receive, send)
+
+    async def _reject_http(self, send) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b'{"detail":"unauthorized"}'})
+
+
 def create_app(config: dict, settings_path: Path) -> FastAPI:
     from server import feedback as feedback_mod
 
     feedback_mod.install_log_capture()  # pipeline prints -> bug-report log tail
     app = FastAPI(title="Clips Kitty API", version="0.1")
+
+    # ---- opt-in single-user auth ----------------------------------------
+    # Off unless BOTH env vars are set to non-empty values (the desktop app
+    # never sets them, so its behaviour is unchanged). One set alone is almost
+    # certainly a typo, so it is warned about and auth stays OFF — fail open
+    # to today's documented behaviour, never fail closed. A single shared user
+    # with no accounts: tokens live in memory and die with the process.
+    auth_user = os.environ.get("CLIPS_STUDIO_AUTH_USER") or ""
+    auth_password = os.environ.get("CLIPS_STUDIO_AUTH_PASSWORD") or ""
+    auth_enabled = bool(auth_user and auth_password)
+    if bool(auth_user) != bool(auth_password):
+        print(
+            "  WARNING: only one of CLIPS_STUDIO_AUTH_USER / CLIPS_STUDIO_AUTH_PASSWORD "
+            "is set — authentication is disabled."
+        )
+    app.state.auth_enabled = auth_enabled
+    sessions = _AuthSessions()
+    if auth_enabled:
+        # Added FIRST, so it runs innermost: Starlette wraps each later
+        # add_middleware around the previous ones, so the CORS and TrustedHost
+        # middlewares added below run BEFORE the token is looked at. A bad Host
+        # or origin is refused first; auth only ever sees what they let through.
+        app.add_middleware(_AuthMiddleware, sessions=sessions)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Vite dev server
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    # Answer only requests addressed to this machine. There is no auth, so a web
-    # page could otherwise reach the API by DNS rebinding: its own domain pointed
-    # at 127.0.0.1 passes the browser's same-origin rules, but still carries its
-    # own name in the Host header, which this refuses.
+    # Answer only requests addressed to this machine. There is no auth by
+    # default, so a web page could otherwise reach the API by DNS rebinding:
+    # its own domain pointed at 127.0.0.1 passes the browser's same-origin
+    # rules, but still carries its own name in the Host header, which this
+    # refuses.
     from starlette.middleware.trustedhost import TrustedHostMiddleware
 
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
@@ -805,8 +943,39 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
     def health():
         # Integrations such as the OBS plugin read these to tell "Clips Kitty is
         # running" apart from "this Clips Kitty is too old for me". api_version
-        # moves only when a supported endpoint changes shape.
-        return {"ok": True, "app_version": app_version, "api_version": API_VERSION}
+        # moves only when a supported endpoint changes shape. auth_enabled tells
+        # the UI whether to show a login page before it makes a request that
+        # would draw a 401.
+        return {
+            "ok": True,
+            "app_version": app_version,
+            "api_version": API_VERSION,
+            "auth_enabled": auth_enabled,
+        }
+
+    @app.post("/login")
+    def login(body: LoginIn):
+        # Exchange the configured shared user for a session token. When auth is
+        # disabled there is nothing to log in to: answer without creating a
+        # session so an over-eager client still learns "you're in". On a wrong
+        # password, sleep ~1s before responding to slow naive brute force, and
+        # never say which of the two fields was wrong.
+        if not auth_enabled:
+            return {"token": None}
+        if not (
+            hmac.compare_digest(auth_user, body.username)
+            and hmac.compare_digest(auth_password, body.password)
+        ):
+            time.sleep(1)
+            raise HTTPException(401, "invalid credentials")
+        return {"token": sessions.issue()}
+
+    @app.post("/logout")
+    def logout(request: Request):
+        header = request.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            sessions.discard(header[len("Bearer "):])
+        return {"ok": True}
 
     @app.get("/health/preflight")
     def preflight_check():

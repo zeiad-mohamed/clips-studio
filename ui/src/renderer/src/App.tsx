@@ -7,12 +7,14 @@ import Models from './pages/Models'
 import Queue from './pages/Queue'
 import Settings from './pages/Settings'
 import Watch from './pages/Watch'
+import Login from './pages/Login'
 import FeedbackHub from './components/FeedbackHub'
 import ModelSwitcher from './components/ModelSwitcher'
 import SetupWizard, { setupDone } from './components/SetupWizard'
 import UpdateBanner from './components/UpdateBanner'
 import { activeLocale, t } from './lib/i18n'
 import { api } from './lib/api'
+import { getToken } from './lib/auth'
 import type { StudioEvent } from './lib/types'
 import { useEvents } from './lib/useEvents'
 import { useQueueNotifications } from './lib/queueNotifications'
@@ -47,6 +49,34 @@ export default function App(): JSX.Element {
   const [page, setPage] = useState<Page>('dashboard')
   const [studioTarget, setStudioTarget] = useState<StudioTarget | null>(null)
   const [creatorTarget, setCreatorTarget] = useState<number | null>(null)
+  // Opt-in single-user login (server/api.py), mirrored here: 'checking' while
+  // the health call decides, 'off' when auth is disabled or the engine is
+  // unreachable (today's behaviour), 'login' for the Login page, 'authed' once
+  // a session token exists. Login renders BEFORE the SetupWizard, so a first
+  // run is: log in, then the setup walkthrough.
+  const [auth, setAuth] = useState<'checking' | 'off' | 'login' | 'authed'>('checking')
+  useEffect(() => {
+    let live = true
+    api
+      .health()
+      .then((h) => {
+        if (!live) return
+        setAuth(!h.auth_enabled ? 'off' : getToken() ? 'authed' : 'login')
+      })
+      .catch(() => {
+        // Engine not reachable: fall back to the ordinary app (its own pages
+        // already show the "engine not reachable" state), not a login wall.
+        if (live) setAuth('off')
+      })
+    // request() (and plugins.call()) drop the token and raise this on a 401 —
+    // a logout elsewhere, or a restart that threw the in-memory tokens away.
+    const expired = (): void => setAuth('login')
+    window.addEventListener('auth-expired', expired)
+    return () => {
+      live = false
+      window.removeEventListener('auth-expired', expired)
+    }
+  }, [])
   // First run: walk the creator through what the installer can't bundle
   // (Ollama, a model) before they hit a video that fails for want of it.
   // Settings can re-open it, so this is not a one-shot.
@@ -108,8 +138,11 @@ export default function App(): JSX.Element {
     return () => clearInterval(id)
   }, [])
   // Mounted at the shell, not on the queue page: the point of a notification
-  // is to reach someone who is NOT looking at the queue.
-  useQueueNotifications()
+  // is to reach someone who is NOT looking at the queue. Only once past the
+  // login gate (or when auth is off) — opening the WebSocket before logging in
+  // would just be refused.
+  const eventsOn = auth === 'off' || auth === 'authed'
+  useQueueNotifications(eventsOn)
   // How many channels are being watched, for the live dot beside "Watched
   // channels", so it shows from every page that the PC is on the job.
   const [watching, setWatching] = useState(0)
@@ -131,7 +164,7 @@ export default function App(): JSX.Element {
         .then((s) => setWatching(s.enabled ? s.watching : 0))
         .catch(() => {})
     }
-  })
+  }, eventsOn)
   // Language switches re-render the tree IN PLACE (no reload): the page
   // state lives here, so the user stays wherever they were (e.g. Settings).
   const [locale, setLocale] = useState(activeLocale())
@@ -150,6 +183,16 @@ export default function App(): JSX.Element {
   const openCreator = (creatorId: number): void => {
     setCreatorTarget(creatorId)
     setPage('creators')
+  }
+
+  // The login gate. 'checking' is a brief placeholder while health resolves;
+  // 'login' is the Login page; anything else is the ordinary app (with the
+  // SetupWizard inside, so a first run is login → setup → app).
+  if (auth === 'checking') {
+    return <div className="h-screen grid place-items-center text-muted">{t('Loading…')}</div>
+  }
+  if (auth === 'login') {
+    return <Login onSuccess={() => setAuth('authed')} />
   }
 
   return (

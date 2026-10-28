@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { API_BASE } from './api'
+import { clearToken, getToken } from './auth'
 import type {
   CatalogResponse,
   Counting,
@@ -71,13 +72,23 @@ async function failure(res: Response): Promise<Error> {
 
 async function call<T>(path: string, init: RequestInit = {}, guarded = false): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = getToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
   if (guarded) {
     const s = await sessionSecret()
     if (!s) throw new Error('Installing and changing plugins needs the Clips Kitty desktop app.')
     headers['X-Clips-Kitty-Session'] = s
   }
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers })
-  if (!res.ok) throw await failure(res)
+  if (!res.ok) {
+    if (res.status === 401) {
+      // Same session-expiry handling as api.request(): drop the token and let
+      // the app fall back to the login page.
+      clearToken()
+      window.dispatchEvent(new Event('auth-expired'))
+    }
+    throw await failure(res)
+  }
   return res.json() as Promise<T>
 }
 

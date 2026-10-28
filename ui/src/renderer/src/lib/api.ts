@@ -46,6 +46,7 @@ import type {
 } from './youtube'
 import type { Capabilities, FanOut, PlatformRow, UploadPostStatus } from './uploadpost'
 import type { RemoteRenderState } from './remoteRender'
+import { clearToken, getToken } from './auth'
 
 /** Engine origin. In the browser Docker build VITE_API_BASE is '' — the
  *  nginx in the ui image proxies API and WebSocket to the engine, so every
@@ -67,11 +68,23 @@ function layoutQuery(source: { url?: string; path?: string }): string {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {})
+  }
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...init
+    ...init,
+    headers
   })
   if (!res.ok) {
+    if (res.status === 401) {
+      // The engine rejected our session (logged out elsewhere, or a restart
+      // threw the in-memory tokens away). Drop it and let App flip back to the
+      // login page via the same window-event mechanism the wizard uses.
+      clearToken()
+      window.dispatchEvent(new Event('auth-expired'))
+    }
     const body = await res.text().catch(() => '')
     throw new Error(`${res.status} ${path}: ${body.slice(0, 200)}`)
   }
@@ -79,7 +92,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  health: () => request<{ ok: boolean }>('/health'),
+  health: () => request<{ ok: boolean; auth_enabled: boolean }>('/health'),
+  /** Exchange the configured single-user credentials for a session token that
+   *  request() attaches to every later call. Only used when auth is on. */
+  login: (username: string, password: string) =>
+    request<{ token: string | null }>('/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password })
+    }),
+  /** Invalidate the current session token; the UI then returns to login. */
+  logout: () => request<{ ok: boolean }>('/logout', { method: 'POST' }),
   /** Can this install actually make a clip? FFmpeg, Ollama, model, GPU, disk. */
   preflight: () => request<Preflight>('/health/preflight'),
   systemStats: () => request<SystemStats>('/system/stats'),

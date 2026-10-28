@@ -13,13 +13,15 @@ docker compose up
 engine from the Dockerfile instead, which takes around ten minutes the first
 time.
 
-**On an Apple Silicon Mac, pull rather than build.** The published image is
-amd64 and runs under emulation, which is fine for editing code and running
-tests. A local build produces an arm64 image, and one dependency has no arm64
-wheel and has to compile, which fails because the base image ships no C
-compiler. [#62](https://github.com/ColinGPT9/clips-studio/issues/62) tracks
-that. Do not reach for `--platform=linux/amd64` on a local build either. That
-emulates the whole ten-minute build, not just the run.
+**On an Apple Silicon Mac, pulling the published amd64 image is still the
+faster way to a first look** — it runs under emulation, which is fine for
+editing code and running tests. A local build produces a native arm64 image
+and works: the one pinned dependency with no arm64 Linux wheel (psutil 5.x)
+compiles from source, and the Dockerfile ships gcc for it
+([#62](https://github.com/ColinGPT9/clips-studio/issues/62)) at the cost of
+about a minute in the build. Do not reach for `--platform=linux/amd64` on a
+local build either. That emulates the whole ten-minute build, not just one
+compile.
 
 **Give the Docker Desktop VM 12 GB of memory, and 4 CPUs.** Docker Desktop,
 Settings, Resources. This is the setting that decides whether renders work at
@@ -35,6 +37,12 @@ Three services, and you need nothing installed but Docker:
 | **engine** | <http://localhost:8765>. The Python pipeline and its API |
 | **ui** | <http://localhost:5173>. The interface, in your browser |
 | **ollama** | the model the scoring runs against |
+
+The UI asks you to log in before anything else: compose ships the engine's
+login wall turned on with **admin / change-me**. Change that password in
+`docker-compose.yml` (`environment:` for the `engine` service), or unset both
+variables there to go back to an open API —
+[API.md](API.md#authentication) has the details.
 
 Run the checks without installing Python:
 
@@ -127,7 +135,7 @@ plumbing and nothing about the judgment. See
 | `clips-data` volume at `/data` | Downloads and clips survive a rebuild, and never bloat the image |
 | `ollama-models` volume | Models are gigabytes; losing them on every rebuild would be miserable |
 | `CLIPS_STUDIO_OLLAMA_HOST` | Inside compose, Ollama is a service name, not localhost |
-| Ports bound to `127.0.0.1` | The API has no authentication and can read and write video files. It must not be reachable from the network. |
+| Ports bound to `127.0.0.1` | The engine can read and write video files, so it must not be reachable from the network. The login wall compose turns on is a second layer, not a substitute. |
 
 The engine binds `0.0.0.0` **inside** the container, because there
 "localhost" means the container itself and nothing on the host could reach

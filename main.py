@@ -171,7 +171,8 @@ def main() -> int:
 
     p_serve = sub.add_parser("serve", help="Run the local API for the desktop app")
     p_serve.add_argument("--port", type=int, default=8765)
-    # Localhost by DEFAULT and on purpose: this API has no authentication,
+    # Localhost by DEFAULT and on purpose: this API has no authentication
+    # unless you opt in with CLIPS_STUDIO_AUTH_USER / CLIPS_STUDIO_AUTH_PASSWORD,
     # and it can read and write video files. Only a container needs to bind
     # 0.0.0.0, where "localhost" means the container itself and nothing on
     # the host could otherwise reach it.
@@ -283,7 +284,10 @@ def main() -> int:
 
             db.close()  # the server manages its own connections
             if args.host != "127.0.0.1":
-                print(f"  WARNING: binding {args.host} — this API has no authentication.")
+                print(
+                    f"  WARNING: binding {args.host} — this API has no authentication unless "
+                    "CLIPS_STUDIO_AUTH_USER / CLIPS_STUDIO_AUTH_PASSWORD are set."
+                )
             uvicorn.run(create_app(config, args.config), host=args.host, port=args.port)
             return 0
 

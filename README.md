@@ -361,7 +361,9 @@ Three services come up together:
 | Ollama | the local AI, on :11434 |
 
 Then pull a model (`docker compose exec ollama ollama pull gemma3:4b`) and
-you have a working checkout.
+you have a working checkout. The UI asks you to log in first: the compose
+stack ships the login wall on with **admin / change-me** — change that
+password in `docker-compose.yml`.
 
 Run the checks the same way:
 
@@ -763,8 +765,10 @@ curl -s http://127.0.0.1:8765/videos/VIDEO_ID/clips \
 working examples and the traps that cost people an afternoon. The service also
 serves its own interactive docs at `http://127.0.0.1:8765/docs`.
 
-It has **no authentication** and it binds localhost for that reason. See the
-security note in the API docs before you point anything at it.
+By default the engine has **no authentication** and binds localhost for that
+reason; the Docker deployment turns the optional login wall on (admin /
+change-me). See the security note in the API docs before you point anything
+at it.
 
 ### Or bring your own model
 

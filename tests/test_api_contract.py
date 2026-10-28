@@ -283,8 +283,9 @@ def test_health_reports_the_api_version(client):
     from server.api import API_VERSION
 
     body = client.get("/health").json()
-    assert set(body) == {"ok", "app_version", "api_version"}
+    assert set(body) == {"ok", "app_version", "api_version", "auth_enabled"}
     assert body["ok"] is True and body["api_version"] == API_VERSION == 1
+    assert body["auth_enabled"] is False  # auth is opt-in; off by default
     assert isinstance(body["app_version"], str) and body["app_version"]
 
 

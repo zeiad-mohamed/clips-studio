@@ -24,6 +24,7 @@ label (stable, experimental or internal), is in the generated
 
 - [Start it](#start-it)
 - [Security: read this before binding anything](#security-read-this-before-binding-anything)
+- [Authentication](#authentication)
 - [Which data directory you are talking to](#which-data-directory-you-are-talking-to)
 - [Supported and internal](#supported-and-internal)
 - [Conventions](#conventions)
@@ -76,11 +77,14 @@ what actually happens when you call them.
 
 ## Security: read this before binding anything
 
-**There is no authentication. None.** Not a token, not a password, not an
-origin check.
+**By default the engine has no authentication at all** — no token, no
+password, no origin check; the desktop app runs it that way. The Docker
+deployment turns the [login wall](#authentication) on out of the box, which
+is what `docker compose up` gives you. Everything here describes the engine
+default.
 
-That is a deliberate trade for a single-user desktop app on loopback, and it
-means anything that can reach the port can:
+That default is a deliberate trade for a single-user desktop app on loopback,
+and it means anything that can reach the port can:
 
 - read every video title, transcript and clip on the machine
 - stream the video files themselves out of `/media/{clip_id}`
@@ -89,7 +93,7 @@ means anything that can reach the port can:
 `main.py` binds `127.0.0.1` by default and prints a warning if you change it:
 
 ```
-WARNING: binding 0.0.0.0 — this API has no authentication.
+WARNING: binding 0.0.0.0 — this API has no authentication unless CLIPS_STUDIO_AUTH_USER / CLIPS_STUDIO_AUTH_PASSWORD are set.
 ```
 
 **Requests must be addressed to `127.0.0.1` or `localhost`.**
@@ -99,10 +103,71 @@ WARNING: binding 0.0.0.0 — this API has no authentication.
 - **This is not authentication.** Any program running on this computer can still
   call the API.
 
-**Exposing this to a network is not a supported configuration.** If you need
-remote access, put your own authenticated service in front of it and keep the
-API itself on loopback. `--host 0.0.0.0` exists for containers, where
-"localhost" means the container and nothing on the host can reach in anyway.
+**Exposing this to a network without the opt-in authentication is not a
+supported configuration.** If you need remote access, put your own
+authenticated service in front of it and keep the API itself on loopback, or
+enable [Authentication](#authentication). `--host 0.0.0.0` exists for
+containers, where "localhost" means the container and nothing on the host can
+reach in anyway.
+
+## Authentication
+
+The Docker deployment ships with the login wall **on**: `docker-compose.yml`
+sets two variables on the engine, so a fresh `docker compose up` asks for a
+login before the app opens.
+
+```yaml
+CLIPS_STUDIO_AUTH_USER: admin
+CLIPS_STUDIO_AUTH_PASSWORD: change-me
+```
+
+**Change that password** (the `environment:` block for the `engine` service)
+before you use it for anything real. Anywhere else the wall is opt-in: set
+both variables on the engine and it turns on — the desktop app never sets
+them, so it never shows a login. Both must be non-empty, or auth stays off;
+setting only one logs a warning and leaves it off. This is a **single shared
+user**: there are no accounts, no sign-up, and no database of users.
+
+Log in to get a session token:
+
+```bash
+curl -X POST http://127.0.0.1:8765/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "admin", "password": "change-me"}'
+# {"token":"<long random string>"}
+```
+
+Attach the token to every request as a Bearer header:
+
+```bash
+curl http://127.0.0.1:8765/videos -H 'Authorization: Bearer <token>'
+```
+
+While auth is on, `GET /health` and `POST /login` stay open; every other HTTP
+route and the WebSocket return `401` (or refuse the handshake) without a valid
+token. `/health` reports the effective state so a client can discover it:
+
+```bash
+curl http://127.0.0.1:8765/health
+# {"ok":true,"app_version":"...","api_version":1,"auth_enabled":true}
+```
+
+Log out — the presented token stops working at once:
+
+```bash
+curl -X POST http://127.0.0.1:8765/logout -H 'Authorization: Bearer <token>'
+```
+
+Notes:
+
+- **WebSocket**: browsers cannot set headers on a `WebSocket`, so pass the
+  token as a query parameter instead — `ws://…/ws?token=<token>`. Because the
+  token is then in the URL, it can appear in proxy and access logs; keep nginx
+  in front (the Docker deployment already does) and treat the token as
+  sensitive.
+- **Sessions are in memory.** A restart invalidates every token, so clients log
+  in again. A failed login waits about a second before answering, to slow
+  guessing.
 
 ## Which data directory you are talking to
 

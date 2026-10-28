@@ -81,7 +81,9 @@ isn't one.
 
 Two things worth knowing if you turn it on:
 
-- **The local API has no authentication** (see above). While an account is connected,
+- **The desktop's local API has no authentication** (the engine's login wall is
+  opt-in, and the Docker deployment turns it on by default —
+  [docs/API.md](docs/API.md#authentication)). While an account is connected,
   anything that can reach `127.0.0.1:8765` can publish to your channel. That is the same
   trust boundary as the rest of the API (it can already read your footage) but the
   consequence is more visible here.
