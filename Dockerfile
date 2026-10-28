@@ -19,9 +19,11 @@ FROM python:3.11-slim
 # git         — yt-dlp and some tooling shell out to it
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
+        gcc \
         git \
         libgl1 \
         libglib2.0-0 \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
