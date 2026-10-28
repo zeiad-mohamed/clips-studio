@@ -36,8 +36,14 @@ services:
       # Optional single-user login wall for exposing the API beyond localhost.
       # Set BOTH (non-empty) to require a login; unset either leaves the API
       # fully open as it is by default. See docs/API.md (Authentication).
-      CLIPS_STUDIO_AUTH_USER: admin
-      CLIPS_STUDIO_AUTH_PASSWORD: change-me
+      #
+      # Written as ${VAR} references, not literals: a literal value is baked
+      # into the deployment unchanged, so variables set in Coolify's UI would
+      # be silently ignored — only ${VAR} references pull from the resource's
+      # Environment Variables page. The `:-` fallbacks keep plain local
+      # `docker compose up` behaving exactly as before.
+      CLIPS_STUDIO_AUTH_USER: ${CLIPS_STUDIO_AUTH_USER:-admin}
+      CLIPS_STUDIO_AUTH_PASSWORD: ${CLIPS_STUDIO_AUTH_PASSWORD:-change-me}
 
   # The renderer, built for production and served by nginx, which also
   # reverse-proxies the API and the /ws WebSocket to the engine. The browser
