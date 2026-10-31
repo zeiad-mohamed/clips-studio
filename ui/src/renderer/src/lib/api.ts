@@ -67,6 +67,20 @@ function layoutQuery(source: { url?: string; path?: string }): string {
   return source.path ? `&path=${encodeURIComponent(source.path)}` : `&url=${encodeURIComponent(source.url ?? '')}`
 }
 
+/** The auth token rides a URL for browser media-element requests. Browsers
+ *  cannot set headers on `<video src>` / `<img src>` / `<audio src>` — the way
+ *  every clip, frame and branding asset is loaded — so when the engine has the
+ *  opt-in login enabled, the session token goes in the query like the /ws
+ *  WebSocket already does (docs/API.md → Authentication: same caveat, the
+ *  token can appear in proxy logs). Auth off, or logged out: the URL is
+ *  returned unchanged and the engine answers without a token exactly as
+ *  before. */
+export function authedSrc(url: string): string {
+  const token = getToken()
+  if (!token) return url
+  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken()
   const headers: Record<string, string> = {
@@ -437,7 +451,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ clip_ids: clipIds, folder })
     }),
-  mediaUrl: (clipId: number) => `${API_BASE}/media/${clipId}`,
+  mediaUrl: (clipId: number) => authedSrc(`${API_BASE}/media/${clipId}`),
   clipWords: (clipId: number) => request<{ words: Word[] }>(`/clips/${clipId}/words`),
   previewClip: (
     clipId: number,
@@ -470,19 +484,24 @@ export const api = {
     }),
   /** A frame of the clip's SOURCE video, `at` (0-1) of the way through, to
    *  draw the Gaming / Reaction webcam and game area on. */
-  sourceFrameUrl: (clipId: number, at = 0.5) => `${API_BASE}/clips/${clipId}/source-frame?at=${at}`,
+  sourceFrameUrl: (clipId: number, at = 0.5) =>
+    authedSrc(`${API_BASE}/clips/${clipId}/source-frame?at=${at}`),
   /** A frame of a video that hasn't been processed yet (a link or a file on
    *  this computer), for setting up a Gaming / Reaction split before processing. */
   videoFrameUrl: (source: { url?: string; path?: string }, at = 0.5) =>
-    `${API_BASE}/sources/frame?at=${at}` +
-    (source.path ? `&path=${encodeURIComponent(source.path)}` : `&url=${encodeURIComponent(source.url ?? '')}`),
+    authedSrc(
+      `${API_BASE}/sources/frame?at=${at}` +
+        (source.path ? `&path=${encodeURIComponent(source.path)}` : `&url=${encodeURIComponent(source.url ?? '')}`)
+    ),
   /** The layout editor's view of a video: its frames, who is on them, a
    *  suggested webcam and border snapping, for a video not processed yet (a
    *  link or file) or for one clip. */
   layoutFrameUrl: (source: LayoutSource, at: number) =>
-    'clipId' in source
-      ? `${API_BASE}/clips/${source.clipId}/source-frame?at=${at}`
-      : `${API_BASE}/sources/frame?at=${at}${layoutQuery(source)}`,
+    authedSrc(
+      'clipId' in source
+        ? `${API_BASE}/clips/${source.clipId}/source-frame?at=${at}`
+        : `${API_BASE}/sources/frame?at=${at}${layoutQuery(source)}`
+    ),
   layoutPeople: (source: LayoutSource, at: number) =>
     request<FramePeople>(
       'clipId' in source ? `/clips/${source.clipId}/people?at=${at}` : `/sources/people?at=${at}${layoutQuery(source)}`
@@ -565,8 +584,10 @@ export const api = {
     }>(`/voices?language=${encodeURIComponent(language)}`),
   // A plain URL, not a blob: the app's CSP allows media from the API only.
   voicePreviewUrl: (language: string, voice?: string) =>
-    `${API_BASE}/voices/preview?language=${encodeURIComponent(language)}` +
-    (voice ? `&voice=${encodeURIComponent(voice)}` : ''),
+    authedSrc(
+      `${API_BASE}/voices/preview?language=${encodeURIComponent(language)}` +
+        (voice ? `&voice=${encodeURIComponent(voice)}` : '')
+    ),
 
   models: () => request<ModelsInfo>('/models'),
   // Settings → AI: local first, or a cloud provider on the user's own key.
@@ -694,7 +715,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path })
     }),
-  brandingAssetUrl: (name: string) => `${API_BASE}/branding/asset/${name}`,
+  brandingAssetUrl: (name: string) => authedSrc(`${API_BASE}/branding/asset/${name}`),
 
   settings: () => request<Settings>('/settings'),
   patchSettings: (patch: Partial<Settings>) =>
@@ -768,7 +789,7 @@ export const api = {
 
   /** A frame from the clip, for the thumbnail picker. Needs img-src in the CSP. */
   clipFrameUrl: (clipId: number, t: number) =>
-    `${API_BASE}/clips/${clipId}/frame?t=${t.toFixed(3)}`,
+    authedSrc(`${API_BASE}/clips/${clipId}/frame?t=${t.toFixed(3)}`),
   /** `image` is base64 data, not a path: the backend never receives a filename
    *  for the thumbnail, so it never has to trust one. */
   chooseThumbnail: (clipId: number, body: { image?: string; t?: number; generated?: number }) =>
@@ -785,7 +806,7 @@ export const api = {
       method: 'POST'
     }),
   generatedThumbnailUrl: (clipId: number, index: number) =>
-    `${API_BASE}/clips/${clipId}/thumbnail/generated/${index}`,
+    authedSrc(`${API_BASE}/clips/${clipId}/thumbnail/generated/${index}`),
 
   // ---- Upload-Post: publishing to several platforms at once ----
   // Same rule as the YouTube routes: everything except /status 404s while the

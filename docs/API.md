@@ -165,6 +165,13 @@ Notes:
   token is then in the URL, it can appear in proxy and access logs; keep nginx
   in front (the Docker deployment already does) and treat the token as
   sensitive.
+- **Media elements**: browsers cannot set headers on `<video src>`/`<img src>`/
+  `<audio src>` requests either, so every HTTP GET route also accepts the token
+  as a query parameter — `http://…/media/<clip_id>?token=<token>`. The UI
+  appends it to those URLs automatically when it holds a session. The caveat is
+  the one above: the token is then in the URL and can appear in proxy and
+  access logs. State-changing methods (POST/PUT/DELETE) never accept a query
+  token — anything capable of those can set the header.
 - **Sessions are in memory.** A restart invalidates every token, so clients log
   in again. A failed login waits about a second before answering, to slow
   guessing.

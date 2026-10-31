@@ -165,6 +165,27 @@ def test_trustedhost_still_refuses_a_bad_host_under_auth(auth_client):
     assert res.status_code == 400
 
 
+# ---- the query token on GETs (media elements cannot set headers) ------------
+
+
+def test_get_accepts_the_token_in_the_query(auth_client):
+    # <video src> / <img src> / <audio src> cannot carry the Bearer header, so
+    # a GET may instead pass `?token=`. A 404 (clip unknown) — not a 401 —
+    # proves auth let the request through to the route.
+    token = _login(auth_client).json()["token"]
+    assert auth_client.get(f"/media/999999?token={token}").status_code == 404
+
+
+def test_get_rejects_a_bogus_query_token(auth_client):
+    assert auth_client.get("/media/999999?token=not-a-real-token").status_code == 401
+
+
+def test_post_never_accepts_a_query_token(auth_client):
+    # State-changing methods require the header, whatever the query says.
+    token = _login(auth_client).json()["token"]
+    assert auth_client.post(f"/creators?token={token}").status_code == 401
+
+
 # ---- WebSocket -------------------------------------------------------------
 
 

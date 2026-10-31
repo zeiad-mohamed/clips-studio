@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { API_BASE, api } from '../lib/api'
+import { API_BASE, api, authedSrc } from '../lib/api'
 import type { Clip, LiveOverlay, TranslationPreview, WatermarkConfig } from '../lib/types'
 import { Scissors, YouTube } from './icons'
 import LiveTextOverlay from './LiveTextOverlay'
@@ -257,7 +257,7 @@ export default function EditorView({
             <video
               key={previewSrc ?? `clip-${clip.id}`}
               ref={videoRef}
-              src={previewSrc ? `${API_BASE}${previewSrc}` : api.mediaUrl(clip.id)}
+              src={previewSrc ? `${API_BASE}${authedSrc(previewSrc)}` : api.mediaUrl(clip.id)}
               controls
               autoPlay
               className="absolute inset-0 w-full h-full object-contain rounded-xl bg-base"

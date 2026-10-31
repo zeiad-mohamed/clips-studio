@@ -754,9 +754,14 @@ class _AuthMiddleware:
     """Pure-ASGI auth gate: requires a valid session token on every HTTP route
     except `GET /health` and `POST /login` (and CORS preflight, which the CORS
     middleware answers first), and on the `/ws` WebSocket via `?token=` (browsers
-    cannot set headers on a WebSocket). Added only while auth is enabled, and
-    after CORS/TrustedHost, so it runs innermost: a bad Host or origin is
-    refused before a token is even looked at.
+    cannot set headers on a WebSocket). GET/HEAD routes additionally accept the
+    token as `?token=` in the query for the same reason: browsers cannot set
+    headers on a media element (`<video src>`, `<img src>`, `<audio src>`), and
+    every media/frame URL is served exactly that way. POST/PUT/DELETE still
+    require the header — anything that can issue those can also set headers.
+    Added only while auth is enabled, and after CORS/TrustedHost, so it runs
+    innermost: a bad Host or origin is refused before a token is even looked
+    at.
 
     Not `BaseHTTPMiddleware`: that never sees `websocket` scopes, so it could
     not guard the event stream. This sees both and can reject the handshake
@@ -776,7 +781,12 @@ class _AuthMiddleware:
             ):
                 await self.app(scope, receive, send)
                 return
-            if self.sessions.valid(_bearer_token(scope.get("headers", []))):
+            token = _bearer_token(scope.get("headers", []))
+            if token is None and method in ("GET", "HEAD"):
+                # Media elements can authenticate only through the URL, so a
+                # GET (never a state-changing method) may ride the query token.
+                token = _query_token(scope.get("query_string", b""))
+            if self.sessions.valid(token):
                 await self.app(scope, receive, send)
                 return
             await self._reject_http(send)
