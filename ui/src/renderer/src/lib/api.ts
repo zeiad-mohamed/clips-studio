@@ -91,6 +91,42 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** The body fields BOTH import routes take — POST /videos/local as its JSON
+ *  body, POST /videos/upload as its `data` part. One builder so the two
+ *  cannot drift: an option added for one arrives in the other. No `path`
+ *  here — the path route has it in the request body, the upload one cannot
+ *  have it at all. */
+function localVideoBody(opts: LocalVideoOpts): Record<string, unknown> {
+  return {
+    title: opts.title ?? '',
+    channel: opts.channel ?? '',
+    platform: opts.platform ?? 'youtube',
+    captions: opts.captions ?? null,
+    caption_style: opts.caption_style ?? null,
+    long_clips: opts.long_clips ?? null,
+    podcast: opts.podcast ?? null,
+    vertical_live: opts.vertical_live ?? null,
+    gaming: opts.gaming ?? null,
+    gaming_layout: opts.gaming_layout ?? null,
+    gaming_remember: opts.gaming_remember ?? null,
+    source_url: opts.source_url ?? '',
+    longform: opts.longform ?? null,
+    watermark_profile_id: opts.watermark_profile_id ?? null,
+    filter: opts.filter ?? null,
+    min_score: opts.min_score ?? null,
+    max_clips: opts.max_clips ?? null,
+    force: opts.force ?? false
+  }
+}
+
+/** A file import's setup, minus the file itself. */
+export type LocalVideoOpts = {
+  title?: string
+  channel?: string
+  platform?: string
+  source_url?: string
+} & JobOptions
+
 export const api = {
   health: () => request<{ ok: boolean; auth_enabled: boolean }>('/health'),
   /** Exchange the configured single-user credentials for a session token that
@@ -157,33 +193,67 @@ export const api = {
     }),
   /** Import a file from this computer and queue it. Takes the same options as
    *  a pasted link, so an upload can be set up exactly like a download. */
-  addLocalVideo: (
-    opts: { path: string; title?: string; channel?: string; platform?: string; source_url?: string } & JobOptions
-  ) =>
+  addLocalVideo: (opts: { path: string } & LocalVideoOpts) =>
     request<{ job_id: number | null; video_id: string; already_processed?: boolean }>('/videos/local', {
       method: 'POST',
-      body: JSON.stringify({
-        path: opts.path,
-        title: opts.title ?? '',
-        channel: opts.channel ?? '',
-        platform: opts.platform ?? 'youtube',
-        captions: opts.captions ?? null,
-        caption_style: opts.caption_style ?? null,
-        long_clips: opts.long_clips ?? null,
-        podcast: opts.podcast ?? null,
-        vertical_live: opts.vertical_live ?? null,
-        gaming: opts.gaming ?? null,
-        gaming_layout: opts.gaming_layout ?? null,
-        gaming_remember: opts.gaming_remember ?? null,
-        source_url: opts.source_url ?? '',
-        longform: opts.longform ?? null,
-        watermark_profile_id: opts.watermark_profile_id ?? null,
-        filter: opts.filter ?? null,
-        min_score: opts.min_score ?? null,
-        max_clips: opts.max_clips ?? null,
-        force: opts.force ?? false
-      })
+      body: JSON.stringify({ path: opts.path, ...localVideoBody(opts) })
     }),
+  /** Queue a file the BROWSER picked: its bytes travel with the request and
+   *  the engine takes it from there — stores it, converts it, and answers and
+   *  queues exactly like addLocalVideo (the server in fact has one shared
+   *  helper behind the two). There is no path for a browser File, and the
+   *  engine never asks for one.
+   *
+   *  XMLHttpRequest rather than fetch(), because only XHR reports upload
+   *  progress (`upload.onprogress`); `onProgress` gives `loaded` and the
+   *  request's total — `null` when the browser cannot compute one, so the
+   *  caller can show an indeterminate bar instead of a lie. Errors carry the
+   *  engine's own words in the same `400 /path: {…}` shape request() throws,
+   *  so errorText() reads them the same way. 401 here drops the session and
+   *  fires `auth-expired` exactly like request(). */
+  uploadVideo: (
+    file: File,
+    opts: LocalVideoOpts,
+    onProgress?: (loaded: number, total: number | null) => void
+  ) =>
+    new Promise<{ job_id: number | null; video_id: string; already_processed?: boolean }>(
+      (resolve, reject) => {
+        const token = getToken()
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', `${API_BASE}/videos/upload`)
+        if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+        const data = new FormData()
+        data.append('file', file, file.name)
+        data.append('data', JSON.stringify(localVideoBody(opts)))
+        if (onProgress) {
+          xhr.upload.onprogress = (e) => onProgress(e.loaded, e.lengthComputable ? e.total : null)
+        }
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              resolve(JSON.parse(xhr.responseText) as {
+                job_id: number | null
+                video_id: string
+                already_processed?: boolean
+              })
+            } catch {
+              reject(new Error(`200 /videos/upload: unparseable response`))
+            }
+            return
+          }
+          if (xhr.status === 401) {
+            // Same as request(): the engine rejected the session, so the app
+            // returns to login instead of repeating the mistake.
+            clearToken()
+            window.dispatchEvent(new Event('auth-expired'))
+          }
+          const body = String(xhr.responseText ?? '')
+          reject(new Error(`${xhr.status} /videos/upload: ${body.slice(0, 200)}`))
+        }
+        xhr.onerror = () => reject(new Error(`0 /videos/upload: upload failed before any answer`))
+        xhr.send(data)
+      }
+    ),
   /** A picked file's size and shape, before it is added (for the Vertical
    *  Live suggestion). */
   localVideoShape: (path: string) =>

@@ -85,10 +85,17 @@ that through X or VNC costs more than it gives.
 
 In a browser everything that talks to the engine works normally, because that
 is all HTTP to `:8765`. What is missing is the handful of things that live in
-Electron's preload: native file pickers, the donate window, opening external
-links. Rather than crashing on those, the renderer installs a stand-in
+Electron's preload: the donate window and opening external links. Rather than
+crashing on those, the renderer installs a stand-in
 (`ui/src/renderer/src/lib/browserShim.ts`) that logs what it cannot do. Open
 the console and you will see exactly which call it was.
+
+The one-time exception is the video file "picker": in a browser it is a plain
+`<input type="file">`, and adding a file uploads its bytes to the engine's
+`POST /videos/upload` (the same import the desktop path-in-a-dialog flow
+lands in), so bringing your own footage works served over the web too. What
+stays Electron-only is anything needing a native dialog on a path — which
+there is no longer anything depending on for imports.
 
 Without Docker, the same thing is:
 

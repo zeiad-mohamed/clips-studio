@@ -8,12 +8,14 @@ Python or the filesystem directly.
 """
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
 import shutil
+import tempfile
 import threading
 import time
 import traceback
@@ -22,14 +24,14 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 import requests as _requests
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from core import queue
 from core.binaries import ffmpeg, ffprobe
-from core.paths import picked_file, safe_name
+from core.paths import discard, picked_file, safe_name
 from core.state import StateDB
 from server.events import broadcaster
 from server.jobs import Worker
@@ -702,6 +704,36 @@ class _AuthSessions:
             self._tokens.discard(token)
 
 
+# An upload is read four megabytes at a time: many reads of a bounded size,
+# never one call handed the whole body. Large enough that a real video costs
+# only a handful of syscalls, small enough that one loop iteration costs
+# nothing to hold.
+_UPLOAD_CHUNK = 4 * 1024 * 1024
+
+
+def _save_upload_part(stream, into: Path) -> str:
+    """Write an uploaded file's bytes to `into`, returning their md5 hex digest.
+
+    The two things an import over HTTP must do with the body — store it and
+    know it by a stable id — read the part **once, in fixed-size chunks**, so
+    nothing holds the whole upload in memory whatever its length (Starlette
+    has already spooled the request body to a temp file; this is the pass that
+    lands it under our own incoming/ name, because a SpooledTemporaryFile has
+    no path to hand to FFmpeg while rolled up). Chunked reads also mean the
+    digest and the file are built in the same pass, so there is no second
+    full read and no second disk copy for hashing alone.
+    """
+    digest = hashlib.md5(usedforsecurity=False)
+    with open(into, "wb") as out:
+        while True:
+            chunk = stream.read(_UPLOAD_CHUNK)
+            if not chunk:
+                break
+            digest.update(chunk)
+            out.write(chunk)
+    return digest.hexdigest()
+
+
 def _bearer_token(headers) -> str | None:
     """The `Bearer <token>` from ASGI scope headers (a list of (bytes, bytes))."""
     for name, value in headers:
@@ -1126,6 +1158,75 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         width, height = modes.probe_size(picked[0])
         return {"width": width, "height": height, "orientation": modes.orientation(width, height)}
 
+    # ---- local imports ------------------------------------------------------
+    # Two doors onto the same import: a file the desktop app picked by path
+    # (POST /videos/local), and one whose bytes a browser uploaded
+    # (POST /videos/upload). They differ only in how the file arrives and how
+    # it is recognised on disk; the registering half is shared, so both
+    # routes answer the same way forever. See the video-import capability's
+    # delta spec (openspec/changes/…/specs/video-import/spec.md).
+
+    def _queue_local_import(body, vid: str, title: str, seconds: float, land) -> dict:
+        """Register an already-identifiable import and queue its job.
+
+        `land` is everything specific to how the file reached this machine —
+        the path route remuxes its picked path into downloads/, the upload
+        route converts a temp copy of the uploaded bytes — and it runs strictly
+        after the queue checks, so a request refused here (queue full, already
+        processed) commits nothing to disk. Responses match what
+        POST /videos/local has always returned; `seconds` is the video's
+        duration for the queue's time estimate."""
+        d = db()
+        try:
+            # The same file added again: say so, as for a pasted link, so the
+            # app can offer "Make clips again". Queued anyway, it finished in
+            # two seconds with nothing made and no word why (#98).
+            if not body.force and not body.longform and d.shorts_made(vid):
+                return {"job_id": None, "already_processed": True, "video_id": vid}
+            if queue.capacity(d) <= 0:
+                raise HTTPException(
+                    409,
+                    f"the queue is full ({queue.MAX_ACTIVE} videos) — let one finish or remove one first",
+                )
+            # Only now is anything written for the new import: past this point
+            # the request has kept the file rather than spent it.
+            land()
+            d.upsert_video(vid, title=title, channel_name=body.channel.strip(), duration=seconds)
+            # The file's original link, only when the user gave one (a downloaded
+            # live's page). Never required, never guessed.
+            from sources.dispatch import platform_of_link
+
+            original = body.source_url.strip()
+            if original and platform_of_link(original):
+                d.set_video_source(vid, original, platform_of_link(original))
+            if body.channel.strip():
+                from creator.identity import tag_video
+
+                platform = body.platform if body.platform in ("youtube", "twitch", "kick") else "youtube"
+                tag_video(d, vid, body.channel.strip(), platform=platform)
+            # force is part of the job, as for a pasted link: without it "Make clips
+            # again" on an uploaded file finished at once, with nothing made.
+            payload = _process_options(body, {"url": f"local:{vid}", "force": body.force}, data_dir=data_dir)
+            job_id = d.add_job("process", json.dumps(payload), video_id=vid, title=title)
+        finally:
+            d.close()
+        worker.notify()
+        broadcaster.publish({"type": "queue"})
+        return {"job_id": job_id, "video_id": vid}
+
+    def _land_file(src: Path, dest: Path, codec: str) -> None:
+        """The path route's land step: remux/copy the picked file into its
+        downloads/ entry, or say so in the message this endpoint has always
+        raised. import_local_source reuses a dest it can already read, so a
+        re-import does not copy what is already there."""
+        from video.encoding import import_local_source
+
+        if not import_local_source(src, dest, codec):
+            raise HTTPException(
+                400,
+                "couldn't convert this file — export it as MP4 (H.264) and try again",
+            )
+
     @app.post("/videos/local")
     def add_local_video(body: LocalVideoIn):
         """Import a video FILE from this computer and run the normal clip
@@ -1184,57 +1285,117 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         ).hexdigest()[:12]
         dest = data_dir / "downloads" / f"{vid}.mp4"
         dest.parent.mkdir(parents=True, exist_ok=True)
-
+        title = body.title.strip() or src.stem
         # H.264, H.265, AV1 and VP9 are stream-copied into the pipeline's mp4
         # layout, which takes seconds; the job converts the slow three to
         # H.264 where the window can show it. Anything else (ProRes, old AVI
         # codecs) is converted here. Never left half-written: see
         # import_local_source, and #122 for what a half-written copy cost.
-        from video.encoding import import_local_source
+        return _queue_local_import(
+            body, vid, title, seconds,
+            lambda: _land_file(src, dest, probe.stdout.strip()),
+        )
 
-        if not import_local_source(src, dest, probe.stdout.strip()):
-            raise HTTPException(
-                400,
-                "couldn't convert this file — export it as MP4 (H.264) and try again",
-            )
+    @app.post("/videos/upload")
+    def upload_local_video(file: UploadFile | None = File(None), data: str = Form("{}")):
+        """Import a video whose BYTES arrived with the request.
 
-        title = body.title.strip() or src.stem
-        platform = body.platform if body.platform in ("youtube", "twitch", "kick") else "youtube"
-        d = db()
+        A browser-served interface has no server-side path to point at
+        (POST /videos/local's contract), so the file comes across the wire.
+        The `data` part carries the same JSON body that route takes, minus the
+        path it cannot have — so an upload is set up exactly like a picked
+        file. The response matches it too: the created job and video ids, the
+        already-processed marker when this exact file has been clipped before.
+
+        Identity is the CONTENT of the bytes, not a path or a name: the part
+        is stored under an engine-chosen incoming/ name in the same pass that
+        computes its digest, and `local_<md5[:12]>` (the same id namespace the
+        path route uses) therefore means the same video whoever sends it, so
+        sending it again is the video it already made rather than a new one.
+        The client name is never trusted enough to name anything.
+        """
+        # The part that is not there is refused in words, not with a schema
+        # error: FastAPI would answer 422 for a missing form part, and the
+        # parity this endpoint promises is with what /videos/local says when
+        # it cannot open a file — 400, one line, and nothing imported.
+        if file is None:
+            raise HTTPException(400, "not a video file this app can open: no file part")
+        part_name = (file.filename or "").strip() or "the uploaded file"
+        part_type = (file.content_type or "").strip().lower()
+        # A recognised extension, or the part's own claim of video/audio. The
+        # claim is only a hint: stored naming and identity never touch it, and
+        # the video-stream probe below is the real gate — this check exists so
+        # a text part is turned away before the bytes are written anywhere.
+        if not (part_name.lower().endswith(_VIDEO_SUFFIXES) or part_type.startswith(("video/", "audio/"))):
+            raise HTTPException(400, f"not a video file this app can open: {part_name}")
         try:
-            # The same file added again: say so, as for a pasted link, so the
-            # app can offer "Make clips again". Queued anyway, it finished in
-            # two seconds with nothing made and no word why (#98).
-            if not body.force and not body.longform and d.shorts_made(vid):
-                return {"job_id": None, "already_processed": True, "video_id": vid}
-            if queue.capacity(d) <= 0:
-                raise HTTPException(
-                    409,
-                    f"the queue is full ({queue.MAX_ACTIVE} videos) — let one finish or remove one first",
-                )
-            d.upsert_video(
-                vid, title=title, channel_name=body.channel.strip(), duration=seconds
+            fields = json.loads(data) if data.strip() else {}
+        except ValueError:
+            raise HTTPException(400, "the data part is not valid JSON")
+        if not isinstance(fields, dict):
+            raise HTTPException(400, "the data part must be a JSON object")
+        fields.pop("path", None)
+        fields["path"] = ""  # never used; keeps the model's shape as-is
+        try:
+            body = LocalVideoIn.model_validate(fields)
+        except ValidationError as e:
+            detail = e.errors()[0].get("msg") or "bad option"
+            raise HTTPException(400, f"invalid options: {detail}")
+
+        import subprocess as sp
+
+        incoming = data_dir / "incoming"
+        incoming.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(suffix=".part", dir=incoming)
+        tmp_path = Path(tmp_name)
+        try:
+            # One pass: the bytes go to our own temp name and the digest is
+            # built as they stream by (see _save_upload_part).
+            vid = "local_" + _save_upload_part(file.file, tmp_path)[:12]
+
+            # Must contain a video stream (catches audio files / random files,
+            # the same rule the path route applies to a picked path).
+            probe = sp.run(
+                [ffprobe(), "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(tmp_path)],
+                capture_output=True, text=True,
             )
-            # The file's original link, only when the user gave one (a downloaded
-            # live's page). Never required, never guessed.
-            from sources.dispatch import platform_of_link
+            if probe.returncode != 0 or not probe.stdout.strip():
+                raise HTTPException(400, "that file doesn't look like a video")
 
-            original = body.source_url.strip()
-            if original and platform_of_link(original):
-                d.set_video_source(vid, original, platform_of_link(original))
-            if body.channel.strip():
-                from creator.identity import tag_video
+            # Length, for the queue's time estimate, from the file as it
+            # arrived — exactly the path route's rule.
+            seconds = 0.0
+            try:
+                dur = sp.run(
+                    [ffprobe(), "-v", "error", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(tmp_path)],
+                    capture_output=True, text=True,
+                )
+                seconds = float(dur.stdout.strip() or 0)
+            except (ValueError, OSError):
+                pass  # only costs a less precise estimate
 
-                tag_video(d, vid, body.channel.strip(), platform=platform)
-            # force is part of the job, as for a pasted link: without it "Make clips
-            # again" on an uploaded file finished at once, with nothing made.
-            payload = _process_options(body, {"url": f"local:{vid}", "force": body.force}, data_dir=data_dir)
-            job_id = d.add_job("process", json.dumps(payload), video_id=vid, title=title)
+            # A browser's name is client-supplied, so it is read for the title
+            # fallback and nothing else — strip whatever directory it claims
+            # and never use it to build a path.
+            stem = Path(part_name.replace("\\", "/")).stem or part_name
+            title = body.title.strip() or stem
+            dest = data_dir / "downloads" / f"{vid}.mp4"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            # The upload's land step. Same conversion the path route uses,
+            # including its reuse of a dest that is already there and
+            # readable — so sending the same bytes again does not copy the
+            # file a second time.
+            def land() -> None:
+                _land_file(tmp_path, dest, probe.stdout.strip())
+
+            # Returning from inside the `try`: the finally still discards the
+            # temp, after registering is fully done and the temp is dead.
+            return _queue_local_import(body, vid, title, seconds, land)
         finally:
-            d.close()
-        worker.notify()
-        broadcaster.publish({"type": "queue"})
-        return {"job_id": job_id, "video_id": vid}
+            discard(tmp_path)  # the temp copy is never the import
 
     @app.get("/jobs")
     def jobs():

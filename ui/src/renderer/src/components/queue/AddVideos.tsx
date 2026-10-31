@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../../lib/api'
 import type { CaptionStyle, JobOptions, PipelineChoice } from '../../lib/types'
 import CaptionStyleControls, {
@@ -35,6 +35,7 @@ import {
 } from '../../lib/sports'
 import { Folder, Trash } from '../icons'
 import { t } from '../../lib/i18n'
+import { probeVideoSize } from '../../lib/probeVideoSize'
 
 const DRAFT_KEY = 'queue-draft'
 
@@ -52,8 +53,18 @@ interface Slot {
   key: string
   /** A pasted link. Empty when this slot is a local file. */
   url: string
-  /** A file on this computer. Null when this slot is a link. */
+  /** A file on this computer, under Electron (the native dialog's paths).
+   *  Null when this slot is a link or a browser-picked file. */
   path: string | null
+  /** The file the BROWSER picked. A File lives only in the page that picked
+   *  it, and nothing here could hand the engine a path anyway — at Generate
+   *  its bytes travel with the request instead. Null under Electron, where
+   *  picking fills `path`. */
+  file?: File | null
+  /** A browser-file slot kept in a draft: the File died with the page that
+   *  held it, so the slot survives as its name and waits for a re-pick
+   *  (settings preserved, file absent). */
+  needsFile?: string | null
   /** Editable name for a local file (a link gets its title from the source). */
   title: string
   options: JobOptions
@@ -315,6 +326,21 @@ export function seedOptions(): JobOptions {
 let counter = 0
 const newKey = (): string => `s${Date.now()}-${counter++}`
 
+/** A browser-picked file's pick-level identity: name + size. The engine
+ *  identifies uploads by their content (its own digest of the bytes), but
+ *  the picker needs a cheap same-file guard right away, and name+size is
+ *  as good as that gets without reading the file. Two different files with
+ *  the same name and byte length is about as rare as it sounds. */
+const fileId = (f: File): string => `${f.name}:${f.size}`
+
+/** The upload line for a slot whose browser file is in flight: a percentage
+ *  when the browser can say what the total is, and the bytes sent so far
+ *  when it cannot — an honest "how far" either way, and never a spin. */
+function uploadNote({ loaded, total }: { loaded: number; total: number | null }): string {
+  if (total) return `${Math.min(100, Math.round((loaded / total) * 100))}%`
+  return `${Math.round(loaded / 1048576)} MB ${t('sent')}`
+}
+
 /** Settings to copy onto another video: everything but the split, which
  *  was set up on this video's own frames. */
 function copyable(o: JobOptions): JobOptions {
@@ -352,7 +378,14 @@ function loadDraft(): Slot[] {
   try {
     const raw = JSON.parse(localStorage.getItem(DRAFT_KEY) ?? 'null')
     if (Array.isArray(raw) && raw.length > 0) {
-      return raw.map((s: Slot) => ({ ...s, key: newKey(), error: undefined }))
+      return raw.map((s: Slot) => ({
+        ...s,
+        key: newKey(),
+        error: undefined,
+        // A stale File{} shell (a draft saved by a build before the drafts
+        // went name-only) is not a file anyone can upload.
+        file: null
+      }))
     }
   } catch {
     /* a corrupt draft is not worth failing over — start clean */
@@ -393,6 +426,13 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
   // is visible while building rather than a refusal after pressing Generate.
   const [capacity, setCapacity] = useState<number | null>(null)
   const [maxActive, setMaxActive] = useState(5)
+  // Browser-picked files: which slot's upload is in flight and how far it is,
+  // keyed by the pick-level file identity. Only read while `busy`, and each
+  // entry is dropped as soon as its own attempt answers either way.
+  const [uploads, setUploads] = useState<Record<string, { loaded: number; total: number | null }>>({})
+  // The hidden <input type="file"> the browser's "Upload video file" label
+  // drives. Electron never sees it: its picking is the native dialog.
+  const pickRef = useRef<HTMLInputElement | null>(null)
   // The sports the engine offers; the Sports toggle shows only when it has one.
   const sports = useSports()
   const offered = sports ?? []
@@ -520,19 +560,24 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
   }, [added])
 
   // Keep the draft. Several pasted links must not die to an accidental close.
+  // A browser-file slot cannot survive JSON — a File serialises to an empty
+  // shell — so it is kept as its NAME only and its restore asks for a
+  // re-pick: settings preserved, file absent (see loadDraft / needsFile).
   useEffect(() => {
-    const keep = slots.filter((s) => s.url.trim() || s.path)
+    const keep = slots
+      .filter((s) => s.url.trim() || s.path || s.file || s.needsFile)
+      .map((s) => (s.file ? { ...s, file: null, needsFile: s.file.name } : s))
     if (keep.length > 0) localStorage.setItem(DRAFT_KEY, JSON.stringify(keep))
     else localStorage.removeItem(DRAFT_KEY)
   }, [slots])
 
-  const ready = slots.filter((s) => s.url.trim() || s.path)
+  const ready = slots.filter((s) => s.url.trim() || s.path || s.file)
   const settingsBad = ready.some(
     (s) =>
       (s.options.pipeline && badSettings[s.key]) ||
       stepProblemKeys(s.key, s.options).some((k) => badSettings[k])
   )
-  const hasFiles = ready.some((s) => s.path)
+  const hasFiles = ready.some((s) => s.path || s.file)
   const wantsWatermark = slots.some((s) => s.options.watermark_profile_id)
   const room = capacity ?? maxActive
   const full = slots.length >= room
@@ -789,6 +834,12 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
   const addSlot = (): void =>
     setSlots((prev) => [...prev, emptySlot(prev[prev.length - 1]?.options)])
 
+  /** A browser cannot hand a native dialog's paths back — `window.studio`
+   *  is the shim there — so the button drives a hidden file input instead
+   *  and the picked Files land as slots through addPickedFiles below. The
+   *  Electron branch is exactly what it always was. */
+  const isBrowser = window.studio.platform === 'browser'
+
   const addFiles = async (): Promise<void> => {
     const picked = await window.studio.pickVideoFiles()
     if (!picked || picked.length === 0) return
@@ -804,7 +855,7 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
           title: (p.split(/[\\/]/).pop() ?? p).replace(/\.[^.]+$/, ''),
           options: copyable(base ?? startingOptions())
         }))
-      const kept = prev.filter((s) => s.url.trim() || s.path)
+      const kept = prev.filter((s) => s.url.trim() || s.path || s.file || s.needsFile)
       return [...kept, ...fresh]
     })
     // Each file's shape, for the Vertical Live suggestion. Best effort: a
@@ -816,6 +867,75 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
         .catch(() => undefined)
     }
   }
+
+  /** The browser half of "Upload video file": the picked Files become slots
+   *  here and nothing else — no path exists to ask for, and NOT ONE BYTE
+   *  moves yet. The file travels with the Generate request (see generate());
+   *  that separation is the rule the queue has always kept: picking builds,
+   *  Generate commits. Deduped by name+size, the picker-level answer to what
+   *  the link row checks; the engine still refuses a re-uploaded duplicate
+   *  as itself, by content, at queue time. */
+  const addPickedFiles = (picked: FileList | null): void => {
+    if (!picked || picked.length === 0) return
+    const files = Array.from(picked)
+    setSlots((prev) => {
+      const known = new Set(prev.filter((s) => s.file).map((s) => fileId(s.file as File)))
+      const base = prev[prev.length - 1]?.options
+      const fresh = files
+        .filter((f) => !known.has(fileId(f)))
+        .map((f) => ({
+          key: newKey(),
+          url: '',
+          path: null,
+          file: f,
+          title: '',
+          options: copyable(base ?? startingOptions())
+        }))
+      const kept = prev.filter((s) => s.url.trim() || s.path || s.file || s.needsFile)
+      return [...kept, ...fresh]
+    })
+    // Each file's shape, for the Vertical Live suggestion — read in the
+    // browser, since a File has no path the engine's shape route could be
+    // asked about. Best effort: a file the browser can't read just gets no
+    // suggestion, as an unreadable picked path does.
+    for (const f of files) {
+      void probeVideoSize(f)
+        .then((shape) => setSlots((prev) => prev.map((s) => (s.file === f ? { ...s, shape } : s))))
+        .catch(() => undefined)
+    }
+  }
+
+  /** Send one browser-picked file up: its bytes travel with the request; the
+   *  engine stores them, converts them, and answers like a picked path does.
+   *  The flight's progress lives in `uploads` for the slot's own line, and
+   *  that entry is gone when the attempt ends — success, refusal, or fault. */
+  const uploadBrowserFile = async (slot: Slot, force: boolean) => {
+    const file = slot.file as File
+    const id = fileId(file)
+    setUploads((prev) => ({ ...prev, [id]: { loaded: 0, total: null } }))
+    try {
+      return await api.uploadVideo(
+        file,
+        {
+          title: slot.title,
+          channel: channel.trim(),
+          source_url: slot.sourceUrl?.trim() ?? '',
+          ...slot.options,
+          ...(force ? { force: true } : {})
+        },
+        (loaded, total) => setUploads((prev) => ({ ...prev, [id]: { loaded, total } }))
+      )
+    } finally {
+      setUploads((prev) => {
+        const { [id]: _gone, ...rest } = prev
+        return rest
+      })
+    }
+  }
+
+  /** What a refusal or an already-processed answer is filed under for this
+   *  slot: the file's pick identity, its path, or its link. */
+  const slotId = (s: Slot): string => (s.file ? fileId(s.file) : (s.path ?? s.url.trim()))
 
   /** Queue everything, then — and only then — start processing.
    *  `force` re-runs videos that were refused for having been clipped before. */
@@ -831,7 +951,7 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
       const done: Slot[] = []
       let ok = 0
 
-      const links = list.filter((s) => !s.path)
+      const links = list.filter((s) => !s.path && !s.file)
       if (links.length > 0) {
         const res = await api.createJobsBatch(
           links.map((s) => ({ url: s.url.trim(), ...s.options, ...(force ? { force: true } : {}) }))
@@ -848,26 +968,31 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
       }
 
       // Local files go one at a time: each is remuxed or transcoded into the
-      // pipeline's layout on the way in, which is real work per file.
-      for (const slot of list.filter((s) => s.path)) {
+      // pipeline's layout on the way in, which is real work per file. A
+      // browser-picked file takes the same walk at its own pace — its bytes
+      // upload first, then the engine does everything a picked path gets.
+      for (const slot of list.filter((s) => s.path || s.file)) {
+        const id = slotId(slot)
         try {
-          const res = await api.addLocalVideo({
-            path: slot.path as string,
-            title: slot.title,
-            channel: channel.trim(),
-            source_url: slot.sourceUrl?.trim() ?? '',
-            ...slot.options,
-            ...(force ? { force: true } : {})
-          })
+          const res = slot.file
+            ? await uploadBrowserFile(slot, force)
+            : await api.addLocalVideo({
+                path: slot.path as string,
+                title: slot.title,
+                channel: channel.trim(),
+                source_url: slot.sourceUrl?.trim() ?? '',
+                ...slot.options,
+                ...(force ? { force: true } : {})
+              })
           // The same file clipped before: offered "Make clips again", as a link is.
           if (res.already_processed) {
             done.push(slot)
-            failures.set(slot.path as string, REASONS.already_processed)
+            failures.set(id, REASONS.already_processed)
             continue
           }
           ok += 1
         } catch (e) {
-          failures.set(slot.path as string, e instanceof Error ? e.message : String(e))
+          failures.set(id, e instanceof Error ? e.message : String(e))
         }
       }
 
@@ -880,10 +1005,10 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
       // fixed rather than re-typed. Everything that went through is cleared.
       const left = slots
         .filter((s) => {
-          const id = s.path ?? s.url.trim()
+          const id = slotId(s)
           return id !== '' && failures.has(id)
         })
-        .map((s) => ({ ...s, error: failures.get(s.path ?? s.url.trim()) }))
+        .map((s) => ({ ...s, error: failures.get(slotId(s)) }))
       setSlots(left.length > 0 ? left : [emptySlot()])
       if (left.length === 0) localStorage.removeItem(DRAFT_KEY)
       if (ok > 0) onAdded?.()
@@ -900,13 +1025,19 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
         {slots.map((slot, n) => (
           <div key={slot.key}>
             <div className="flex gap-3 items-center flex-wrap">
-              {slot.path ? (
+              {slot.path || slot.file || slot.needsFile ? (
                 <input
                   className="input w-72 max-w-full"
                   aria-label={`Title for video ${n + 1}`}
-                  title={slot.path}
+                  title={slot.path ?? slot.file?.name ?? slot.needsFile ?? undefined}
                   value={slot.title}
-                  placeholder={t('Video title')}
+                  // A browser-picked file shows its own name here until the
+                  // user says otherwise: the engine defaults an uploaded
+                  // video's title to the file's name, and the field not
+                  // lying about that is the point of a placeholder.
+                  placeholder={
+                    slot.file ? slot.file.name : slot.needsFile ? slot.needsFile : t('Video title')
+                  }
                   onChange={(e) => patch(slot.key, { title: e.target.value })}
                 />
               ) : (
@@ -1184,7 +1315,15 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
                 <button
                   className="btn-ghost !py-1 shrink-0"
                   disabled={!slot.path && !slot.url.trim()}
-                  title={!slot.path && !slot.url.trim() ? t('Paste a link or add a file first') : undefined}
+                  title={
+                    !slot.path && !slot.url.trim()
+                      ? slot.file
+                        ? t(
+                            'The layout editor reads this video’s frames from the engine, and a browser-uploaded file has no path it could be read from yet — a link or the desktop app can.'
+                          )
+                        : t('Paste a link or add a file first')
+                      : undefined
+                  }
                   onClick={() => setSplitFor(slot.key)}
                 >
                   {slot.options.gaming_layout ? t('Change layout…') : t('Choose layout…')}
@@ -1208,13 +1347,13 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
                 }
               />
             )}
-            {slot.path && (
+            {(slot.path || slot.file) && (
               <VerticalHint
                 slot={slot}
                 onUse={() => replaceOptions(slot.key, toggle(slot.options, 'vertical_live', true))}
               />
             )}
-            {slot.path && slot.options.vertical_live && (
+            {(slot.path || slot.file) && slot.options.vertical_live && (
               <div className="flex items-center gap-3 flex-wrap mt-2">
                 <span className="label shrink-0">{t('Original link')}</span>
                 <input
@@ -1225,6 +1364,18 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
                   onChange={(e) => patch(slot.key, { sourceUrl: e.target.value })}
                 />
               </div>
+            )}
+            {slot.file && uploads[fileId(slot.file)] ? (
+              <p className="text-xs text-muted mt-1">
+                {`${t('Uploading…')} ${uploadNote(uploads[fileId(slot.file)] ?? { loaded: 0, total: null })}`}
+              </p>
+            ) : null}
+            {slot.needsFile && !slot.file && !slot.path && (
+              <p className="text-xs text-muted mt-1">
+                {t('This file was not kept when the page closed — pick it again to queue it.')}
+                {' '}
+                {slot.needsFile}
+              </p>
             )}
             {slot.error && <p className="text-sm text-error mt-1">{slot.error}</p>}
           </div>
@@ -1243,10 +1394,33 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
           >
             + {t('Add video')}
           </button>
-          <button className="btn-ghost shrink-0" onClick={addFiles} disabled={full}>
-            <Folder className="mr-1.5" />
-            {t('Upload video file')}
-          </button>
+          {isBrowser ? (
+            // A browser has the picker built in: the label hides an actual
+            // <input type="file"> — the label-for-input association is the
+            // accessibility contract, same one the checkbox labels carry
+            // above. Nothing is uploaded here; Generate does that.
+            <label className={`btn-ghost shrink-0 ${full ? 'opacity-50' : 'cursor-pointer'}`}>
+              <input
+                ref={pickRef}
+                type="file"
+                multiple
+                accept="video/*,audio/*"
+                className="hidden"
+                disabled={full}
+                onChange={(e) => {
+                  addPickedFiles(e.target.files)
+                  e.target.value = '' // the same file can be picked again
+                }}
+              />
+              <Folder className="mr-1.5" />
+              {t('Upload video file')}
+            </label>
+          ) : (
+            <button className="btn-ghost shrink-0" onClick={addFiles} disabled={full}>
+              <Folder className="mr-1.5" />
+              {t('Upload video file')}
+            </button>
+          )}
           {/* Greyed out until there is an upload, the same way Caption style
               is greyed out until Captions is ticked. A downloaded video takes
               its channel from the source metadata; only a file off your

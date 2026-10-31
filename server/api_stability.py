@@ -51,6 +51,7 @@ ROUTES: dict[tuple[str, str], tuple[str, str, str]] = {
     ("POST", "/jobs"): (STABLE, "submit", "Queue one link with its options."),
     ("POST", "/jobs/batch"): (STABLE, "submit", "Queue several links, each with its own options; bad ones are reported, not fatal."),
     ("POST", "/videos/local"): (STABLE, "submit", "Queue a video file already on this computer."),
+    ("POST", "/videos/upload"): (EXPERIMENTAL, "submit", "Queue a video whose bytes are uploaded from a browser."),
     ("GET", "/sports"): (STABLE, "submit", "The sports a job's `sport` option can name, with their choices."),
     # Watching progress
     ("GET", "/jobs"): (STABLE, "progress", "Every job, newest last (a bare array)."),

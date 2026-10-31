@@ -479,6 +479,46 @@ A path that is not a readable video gives `400`:
 {"detail": "not a video file this app can open: C:/does/not/exist.mp4"}
 ```
 
+### `POST /videos/upload`
+
+`multipart/form-data`. The same import for a client that has no path to give
+— a browser. Two parts:
+
+- **`file`** (required) — the video's actual bytes. The engine names and
+  stores the file itself; whatever name the part carries (`filename`) is read
+  only as the default `title`.
+- **`data`** (optional JSON string, default `"{}"`) — the same body fields
+  `POST /videos/local` takes, minus `path`, which it cannot have: `title`,
+  `channel`, `source_url`, and the same option fields as `POST /jobs`.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     -F "file=@friday.mp4" \
+     -F 'data={"title":"Friday stream","channel":"examplechannel"}' \
+     http://127.0.0.1:8765/videos/upload
+```
+
+The response, the refusals and the queue's rules are exactly the path route's:
+
+```json
+{"job_id": 149, "video_id": "local_aB3dEfGhIjKl"}
+```
+
+`title` defaults to the browser's file name (its bare stem). **Set
+`channel`** the same way as above. A file the engine already finished clips
+for answers `{"job_id": null, "already_processed": true, "video_id": …}`;
+`force: true` in `data` clips it again. Identity is the file's **content**:
+uploading the same bytes again — under any name — is the same video, reusing
+the converted copy in `data/downloads/`. It raises no messages of its own:
+a part that is missing or not media, and bytes the probe finds no video
+stream in, answer the same `400` lines `POST /videos/local` raises
+(`not a video file this app can open: …`, `that file doesn't look like a
+video`, `couldn't convert this file — …`), and a full queue answers the same
+`409 the queue is full (N videos) …` with nothing imported. A refused request
+writes nothing under `data/`: the body is streamed to a temporary file while
+it is checked, and it is gone — success or refusal — by the time the
+response returns.
+
 ### `GET /sports`
 
 The sports a job's `sport` option can name, with the choices each takes:

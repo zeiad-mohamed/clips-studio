@@ -4,7 +4,7 @@
 
 API version **1** (`GET /health` → `api_version`). The engine listens on `http://127.0.0.1:8765`. How to call it, with examples and the gotchas, is in [`docs/API.md`](../API.md); what the labels promise is in [API](api.md).
 
-198 routes: **60 stable**, **25 experimental**, 113 internal.
+199 routes: **60 stable**, **26 experimental**, 113 internal.
 
 | Label | Promise |
 |---|---|
@@ -32,6 +32,7 @@ Details: [`docs/API.md` › Submitting work](../API.md#submitting-work).
 | `POST /jobs/batch` | stable | Queue several links, each with its own options; bad ones are reported, not fatal. |
 | `GET /sports` | stable | The sports a job's `sport` option can name, with their choices. |
 | `POST /videos/local` | stable | Queue a video file already on this computer. |
+| `POST /videos/upload` | experimental | Queue a video whose bytes are uploaded from a browser. |
 
 ## Watching progress
 
