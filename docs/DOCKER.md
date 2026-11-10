@@ -142,12 +142,49 @@ plumbing and nothing about the judgment. See
 | `clips-data` volume at `/data` | Downloads and clips survive a rebuild, and never bloat the image |
 | `ollama-models` volume | Models are gigabytes; losing them on every rebuild would be miserable |
 | `CLIPS_STUDIO_OLLAMA_HOST` | Inside compose, Ollama is a service name, not localhost |
+| `CLIPS_STUDIO_POT_PROVIDER_URL` | Points the engine at the compose PO-token sidecar (`pot-provider`) used for YouTube downloads off a hosted IP. Service-name DNS, because inside a container 127.0.0.1 is the container itself. |
 | Ports bound to `127.0.0.1` | The engine can read and write video files, so it must not be reachable from the network. The login wall compose turns on is a second layer, not a substitute. |
 
 The engine binds `0.0.0.0` **inside** the container, because there
 "localhost" means the container itself and nothing on the host could reach
 it. The published port is still host-only, and `main.py serve` warns when
 asked to bind anything other than `127.0.0.1`.
+
+## YouTube from a hosted server
+
+A hosted server's IP is exactly the kind YouTube pre-flags: a plain download
+dies with *"Sign in to confirm you're not a bot"* no matter how many times
+it is retried, and the desktop app's IPv4/IPv6 fallback has no second
+address to fall back to. The fix the yt-dlp
+[PO Token Guide](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide)
+itself recommends is a Proof-of-Origin token provider, and compose runs
+one: the `pot-provider` service
+([bgutil](https://github.com/Brainicism/bgutil-ytdlp-pot-provider),
+maintained by a yt-dlp maintainer, no Google account involved). The plugin
+half is already installed in the engine image; the engine finds the server
+through `CLIPS_STUDIO_POT_PROVIDER_URL`. Tokens are minted per video by the
+sidecar, so throughput scales with the engine's one-download-at-a-time
+pace.
+
+Confirm it end to end without leaving Docker:
+
+```
+docker compose exec engine yt-dlp -v --skip-download \
+    "https://www.youtube.com/watch?v=Aasf8N1haeE" 2>&1 | grep -i pot
+```
+
+`PO Token Providers: bgutil:http-<version> (external)` means the plugin
+loaded; a `Generating a ... PO Token` line during a real download means a
+token was minted. If tokens are minted and the wall still comes up, that
+IP is a hard one — the documented remedy on top of a token is a cookie file
+from a **throwaway** account, exported exactly the way the
+[extractors wiki](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)
+prescribes (an incognito window, `youtube.com/robots.txt` as the only open
+tab, close it at once so the session is never rotated), then handed to
+yt-dlp with `--cookies`. Never a main account: the wiki warns an account
+used with yt-dlp from a flagged IP can be banned. None of this applies to a
+desktop install, whose home connection usually needs no tokens — and the
+engine image installs no cookies anywhere by itself.
 
 ## First build is slow
 

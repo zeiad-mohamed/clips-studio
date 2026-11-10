@@ -1,5 +1,7 @@
-# Contributor environment AND deployment stack: the Clips Kitty engine plus
-# the renderer served by nginx.
+# Contributor environment AND deployment stack: the Clips Kitty engine, the
+# renderer served by nginx, and a PO-token sidecar that keeps YouTube
+# downloadable from a hosted IP, where YouTube pre-flags every plain yt-dlp
+# request.
 #
 #   docker compose up --build        engine on http://localhost:8765,
 #                                    ui on http://localhost:5173
@@ -15,6 +17,8 @@ services:
     # GHCR image here; with `image:` present, compose pulls it instead of
     # building, so local changes never made it into the container.)
     build: .
+    depends_on:
+      - pot-provider
     # No ports published here: deploy platforms (Coolify) reach containers
     # over the Docker network and a fixed host port would collide between
     # projects on one server. Local development gets the ports from
@@ -44,6 +48,29 @@ services:
       # `docker compose up` behaving exactly as before.
       CLIPS_STUDIO_AUTH_USER: ${CLIPS_STUDIO_AUTH_USER:-admin}
       CLIPS_STUDIO_AUTH_PASSWORD: ${CLIPS_STUDIO_AUTH_PASSWORD:-change-me}
+      # The PO-token generator (pot-provider below), reached over the compose
+      # network by service DNS. Inside the engine container 127.0.0.1 is the
+      # engine itself — the same reason Ollama got a host variable. The ${...}
+      # fallback keeps this working as written while letting a deploy
+      # platform's Environment Variables page override it.
+      CLIPS_STUDIO_POT_PROVIDER_URL: ${CLIPS_STUDIO_POT_PROVIDER_URL:-http://pot-provider:4416}
+
+  # YouTube Proof-of-Origin tokens for the engine (sources/ytdlp_common.py).
+  # From a datacenter IP, YouTube answers plain yt-dlp requests with
+  # "Sign in to confirm you're not a bot" — the address is pre-flagged, and
+  # the engine's IPv4/IPv6 retry gets nowhere there. bgutil generates the
+  # tokens the yt-dlp PO Token Guide recommends for exactly this, with no
+  # Google account involved; the plugin half is installed in the engine
+  # image (Dockerfile) and finds the server through
+  # CLIPS_STUDIO_POT_PROVIDER_URL.
+  #
+  # Do not publish ports for it: the token endpoint is unauthenticated, and
+  # serving bites of attestation to strangers is CPU, bandwidth, and, per
+  # the upstream README's warning, an RCE surface. Reachable only over the
+  # compose network, which is the intended shape.
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    init: true
 
   # The renderer, built for production and served by nginx, which also
   # reverse-proxies the API and the /ws WebSocket to the engine. The browser

@@ -36,7 +36,14 @@ COPY requirements.txt requirements-build.txt ./
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
         torch torchvision \
     && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir "bgutil-ytdlp-pot-provider>=2.0.2" \
     && pip install --no-cache-dir ruff pytest
+
+# bgutil-ytdlp-pot-provider is the yt-dlp side of the pot-provider sidecar in
+# docker-compose.yml. It is installed HERE, not in requirements.txt: the
+# Windows installer is built from this same tree, and a creator's PC carries
+# a residential IP and downloads anonymously — it should not ship a plugin
+# whose sidecar can never exist next to it.
 
 # Source is bind-mounted by compose so edits are live; this copy is what
 # makes the image useful on its own.

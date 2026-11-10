@@ -6,6 +6,7 @@ Without a progress hook the UI's bar sits still during a long VOD download
 aborts promptly if the video is cancelled.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -46,6 +47,27 @@ _ipv4_only = False
 # it always was, whatever YouTube has been doing.
 _YOUTUBE = re.compile(r"(?:^|//|\.)(?:youtube\.com|youtu\.be|youtube-nocookie\.com)(?:[/:?#]|$)", re.I)
 
+# Hosted deployments (docker-compose.yml's pot-provider service) run bgutil's
+# PO-token provider as a sidecar and name its address here. yt-dlp's plugin
+# would otherwise ask http://127.0.0.1:4416, and inside a container that is
+# the engine itself, not the sidecar. A desktop install never sets this and
+# keeps the plugin's own default, so the PC's anonymous download is untouched.
+_PROVIDER_ENV = "CLIPS_STUDIO_POT_PROVIDER_URL"
+
+
+def _provider_opts(opts: dict) -> dict:
+    """`opts` plus the sidecar's address, as yt-dlp's extractor arguments.
+
+    Applied to every request in extract_info, so probes, channel resolution
+    and downloads all reach the provider, not only the big ones.
+    """
+    base = os.environ.get(_PROVIDER_ENV)
+    if not base:
+        return opts
+    args = {**opts.get("extractor_args", {})}
+    args["youtubepot-bgutilhttp"] = {"base_url": [base]}
+    return {**opts, "extractor_args": args}
+
 
 def is_bot_check(error) -> bool:
     return _BOT_CHECK in str(error)
@@ -62,6 +84,8 @@ def extract_info(url: str, opts: dict, *, download: bool = False, process: bool 
     """
     global _ipv4_only
     import yt_dlp
+
+    opts = _provider_opts(opts)
 
     # Asked as each caller used to ask: `process` only where one turned it off.
     how = {"download": download} if process else {"download": download, "process": False}
